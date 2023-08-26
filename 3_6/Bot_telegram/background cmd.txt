@@ -1,0 +1,3 @@
+nohup python auto_relply_quotes.py > filelog.txt &
+
+nohup python auto_relply_quotes_venezia.py > filelog_venezia.txt &
