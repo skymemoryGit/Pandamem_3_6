@@ -1,0 +1,12 @@
+telegram
+python-telegram-bot
+
+nest-asyncio
+
+openai
+
+bing_image_downloader
+
+pillow # do sudo apt-get install libjpeg-dev if dont working
+
+numpy
