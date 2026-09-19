@@ -9,6 +9,7 @@ Avvio: doppio click su avvia_bot.bat (installa le dipendenze e lancia il bot)
        oppure  python main.py  dalla cartella Bot_telegram.
 """
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -37,12 +38,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("pandamem")
 
 import costant as key
-import Responses as r
 
 try:
     from telegram import BotCommand, LinkPreviewOptions
-    from telegram.constants import ParseMode
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters
+    from telegram.constants import ChatAction, ParseMode
+    from telegram.ext import Application, CommandHandler
 except ImportError:
     print(
         "\nManca la libreria python-telegram-bot (o e' installata la versione sbagliata).\n"
@@ -86,6 +86,37 @@ def _args_text(context):
     return " ".join(context.args).strip() if context.args else ""
 
 
+# --- Indicatore "sta scrivendo..." ------------------------------------------
+# Telegram fa scadere l'azione dopo circa 5 secondi, quindi va rinnovata finche'
+# il bot sta lavorando: cosi' l'utente vede "PandaMem sta scrivendo..." per tutto
+# il tempo, e non solo per i primi secondi.
+INTERVALLO_AZIONE = 4
+
+
+async def _ripeti_azione(bot, chat_id, azione):
+    try:
+        while True:
+            await bot.send_chat_action(chat_id=chat_id, action=azione)
+            await asyncio.sleep(INTERVALLO_AZIONE)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.debug("Indicatore %s interrotto: %s", azione, e)
+
+
+@contextlib.asynccontextmanager
+async def _azione_in_corso(bot, chat_id, azione=None):
+    """Mostra l'indicatore finche' il blocco 'async with' e' in esecuzione."""
+    azione = azione or ChatAction.TYPING
+    task = asyncio.create_task(_ripeti_azione(bot, chat_id, azione))
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 # --- Preparazione foto -------------------------------------------------------
 # Telegram rifiuta le foto sopra i 10 MB e quelle con lati troppo grandi
 # (larghezza+altezza max 10000). Diverse immagini in img/waifu superano i 28 MB,
@@ -123,10 +154,11 @@ def _prepara_foto(path):
 
 
 async def _send_photo(update, path, caption=None):
-    """Invia una foto gestendo ridimensionamento e timeout generosi."""
-    path = await asyncio.to_thread(_prepara_foto, path)
-    with open(path, "rb") as f:
-        await update.message.reply_photo(f, caption=caption, write_timeout=120, read_timeout=60)
+    """Invia una foto gestendo ridimensionamento, indicatore e timeout generosi."""
+    async with _azione_in_corso(update.get_bot(), update.effective_chat.id, ChatAction.UPLOAD_PHOTO):
+        path = await asyncio.to_thread(_prepara_foto, path)
+        with open(path, "rb") as f:
+            await update.message.reply_photo(f, caption=caption, write_timeout=120, read_timeout=60)
 
 
 # ----------------------------------------------------------------------------
@@ -150,12 +182,6 @@ async def help_command(update, context):
         "/waifu <testo>\n"
         "/infocamere  - annunci di lavoro InfoCamere\n"
     )
-
-
-async def handle_message(update, context):
-    txt = str(update.message.text)
-    ris = r.sample_response(txt)
-    await update.message.reply_text(ris)
 
 
 async def error_handler(update, context):
@@ -274,15 +300,14 @@ async def gpt_command(update, context):
         domanda = f"{nome}: {s}"
 
     print(domanda)
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
     storico = _storico_chat(context)
-    try:
-        risposta = await asyncio.to_thread(llm.chiedi, domanda, list(storico))
-        _aggiorna_storico(context, domanda, risposta)
-    except Exception as e:
-        log.exception("Errore /gpt")
-        risposta = f"Errore Gemini: {e}"
+    async with _azione_in_corso(context.bot, update.effective_chat.id):
+        try:
+            risposta = await asyncio.to_thread(llm.chiedi, domanda, list(storico))
+            _aggiorna_storico(context, domanda, risposta)
+        except Exception as e:
+            log.exception("Errore /gpt")
+            risposta = f"Errore Gemini: {e}"
 
     print(risposta)
     for chunk in infocamere.split_message(risposta):
@@ -297,13 +322,13 @@ NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 async def infocamere_command(update, context):
     """Manda la lista degli annunci di lavoro InfoCamere."""
-    await update.message.reply_text("Controllo gli annunci InfoCamere...")
-    try:
-        jobs = await asyncio.to_thread(infocamere.get_job_listings)
-    except Exception as e:
-        log.exception("Errore /infocamere")
-        await update.message.reply_text(f"Errore nel recupero degli annunci: {e}")
-        return
+    async with _azione_in_corso(context.bot, update.effective_chat.id):
+        try:
+            jobs = await asyncio.to_thread(infocamere.get_job_listings)
+        except Exception as e:
+            log.exception("Errore /infocamere")
+            await update.message.reply_text(f"Errore nel recupero degli annunci: {e}")
+            return
 
     text = infocamere.build_listing_message(jobs)
     for chunk in infocamere.split_message(text):
@@ -376,8 +401,10 @@ def build_application():
     application.add_handler(CommandHandler("waifu", waifu_command))
     application.add_handler(CommandHandler("infocamere", infocamere_command))
 
-    # Risposte ai messaggi normali (non comandi): scommenta per attivare
-    # application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # NESSUN handler sui messaggi normali: il bot non legge il contenuto delle chat.
+    # Si interpella solo con i comandi qui sopra (/gpt e gli altri).
+    # Per impedirgli anche di RICEVERE i messaggi del gruppo serve la privacy mode
+    # attiva su @BotFather (/setprivacy -> Enable) e ri-aggiungerlo al gruppo.
 
     application.add_error_handler(error_handler)
 
