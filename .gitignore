@@ -1,0 +1,15 @@
+# PandaMem
+.env
+env.ini
+.venv/
+counter.txt
+tmp/
+bot_out.log
+bot_err.log
+__pycache__/
+*.pyc
+filelog*.txt
+3_6/Bot_telegram/img/pandamem/result.png
+3_6/Bot_telegram/img/waifu/prova_testo.png
+3_6/Bot_telegram/generato/
+3_6/Bot_telegram/img/pythonImgDownload/
